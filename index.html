@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="bn">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SD Enterprise — Live Sync</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,"Noto Sans Bengali",sans-serif;background:#f3f6fb;color:#14213d}
+button,input,select{font:inherit}button{border:0;border-radius:12px;padding:12px 15px;background:#075fe8;color:#fff;font-weight:700;cursor:pointer}
+.app{max-width:1100px;margin:auto}.top{background:#063b82;color:white;padding:18px 20px;position:sticky;top:0;z-index:5}.top h1{margin:0;font-size:22px}.top small{opacity:.8}.nav{display:flex;gap:8px;overflow:auto;padding:12px;background:#fff;position:sticky;top:73px;z-index:4}.nav button{white-space:nowrap;background:#e9f0fb;color:#17345f}.nav button.active{background:#075fe8;color:#fff}.page{padding:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.card{background:#fff;border-radius:16px;padding:16px;box-shadow:0 3px 14px #153d6b12}.metric{font-size:25px;font-weight:800;margin-top:5px}.muted{color:#71809a;font-size:13px}.form{display:grid;gap:10px}.form input,.form select{width:100%;padding:12px;border:1px solid #d7dfeb;border-radius:10px;background:#fff}.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}.hidden{display:none!important}.list{display:grid;gap:8px;margin-top:12px}.item{background:#fff;padding:12px;border-radius:12px;border:1px solid #e5eaf2}.danger{background:#dc3545}.success{background:#149447}.warn{background:#f09a00}.login{min-height:100vh;display:grid;place-items:center;padding:20px;background:linear-gradient(145deg,#062e68,#0b6cff)}.loginbox{width:min(430px,100%);background:white;border-radius:22px;padding:28px;box-shadow:0 15px 45px #0003}.logo{font-size:38px;font-weight:900;color:#075fe8}.status{position:fixed;right:14px;bottom:14px;padding:9px 12px;border-radius:20px;background:#26384f;color:white;font-size:12px;z-index:20}.online{background:#168b48}.offline{background:#b97800}.section{margin-top:16px}.section h2{font-size:18px}.right{float:right}.empty{text-align:center;padding:28px;color:#71809a}
+</style>
+</head>
+<body>
+<div id="login" class="login">
+  <div class="loginbox">
+    <div class="logo">SD</div><h1>SD Enterprise</h1>
+    <p class="muted">Shop Management • 2 Phone Live Sync</p>
+    <div id="authMsg" class="muted"></div>
+    <div class="form">
+      <input id="email" type="email" placeholder="Email">
+      <input id="password" type="password" placeholder="Password">
+      <button id="loginBtn">Login</button>
+      <button id="signupBtn" style="background:#e9f0fb;color:#17345f">Create account</button>
+    </div>
+  </div>
+</div>
+
+<div id="app" class="app hidden">
+  <div class="top"><h1>SD Enterprise</h1><small id="userLine">Shop Management System</small><button id="logout" class="right danger" style="padding:8px 11px">Logout</button></div>
+  <div class="nav">
+    <button data-page="dashboard" class="active">Dashboard</button><button data-page="products">Stock</button>
+    <button data-page="sales">Sales</button><button data-page="due">Due</button><button data-page="bank">Banking</button>
+    <button data-page="services">Print/Flexi</button><button data-page="expense">Expense</button><button data-page="reports">Reports</button>
+  </div>
+  <main class="page">
+    <section id="dashboard" class="screen"></section>
+    <section id="products" class="screen hidden"></section>
+    <section id="sales" class="screen hidden"></section>
+    <section id="due" class="screen hidden"></section>
+    <section id="bank" class="screen hidden"></section>
+    <section id="services" class="screen hidden"></section>
+    <section id="expense" class="screen hidden"></section>
+    <section id="reports" class="screen hidden"></section>
+  </main>
+</div>
+<div id="sync" class="status offline">Connecting…</div>
+
+<script type="module">
+import {initializeApp} from "https://www.gstatic.com/firebasejs/11.0.2/firebase-app.js";
+import {getAuth,onAuthStateChanged,signInWithEmailAndPassword,createUserWithEmailAndPassword,signOut} from "https://www.gstatic.com/firebasejs/11.0.2/firebase-auth.js";
+import {getFirestore,collection,addDoc,updateDoc,deleteDoc,doc,onSnapshot,query,orderBy,serverTimestamp} from "https://www.gstatic.com/firebasejs/11.0.2/firebase-firestore.js";
+
+/* ====== REPLACE THESE WITH YOUR FIREBASE WEB APP CONFIG ====== */
+const firebaseConfig = {
+  apiKey: "PASTE_API_KEY",
+  authDomain: "PASTE_PROJECT.firebaseapp.com",
+  projectId: "PASTE_PROJECT_ID",
+  storageBucket: "PASTE_PROJECT.firebasestorage.app",
+  messagingSenderId: "PASTE_SENDER_ID",
+  appId: "PASTE_APP_ID"
+};
+/* ============================================================= */
+
+const configured = !firebaseConfig.apiKey.startsWith("PASTE_") && !firebaseConfig.projectId.startsWith("PASTE_");
+const $=id=>document.getElementById(id);
+const login=$("login"), appEl=$("app"), sync=$("sync");
+let db,auth,user,unsubs=[],data={products:[],sales:[],dues:[],bank:[],services:[],expenses:[]};
+
+function money(n){return "৳ "+Number(n||0).toLocaleString("en-BD")}
+function esc(s){return String(s??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]))}
+function showPage(p){
+ document.querySelectorAll(".screen").forEach(x=>x.classList.add("hidden"));
+ $(p).classList.remove("hidden");
+ document.querySelectorAll(".nav button").forEach(b=>b.classList.toggle("active",b.dataset.page===p));
+ render();
+}
+document.querySelectorAll(".nav button").forEach(b=>b.onclick=()=>showPage(b.dataset.page));
+
+async function add(col,obj){await addDoc(collection(db,"shops",user.uid,col),{...obj,createdAt:serverTimestamp()})}
+async function edit(col,id,obj){await updateDoc(doc(db,"shops",user.uid,col,id),obj)}
+async function remove(col,id){await deleteDoc(doc(db,"shops",user.uid,col,id))}
+
+function subscribe(){
+ unsubs.forEach(f=>f());unsubs=[];
+ for(const c of Object.keys(data)){
+   const q=query(collection(db,"shops",user.uid,c),orderBy("createdAt","desc"));
+   unsubs.push(onSnapshot(q,s=>{data[c]=s.docs.map(d=>({id:d.id,...d.data()}));sync.textContent="● Live Sync";sync.className="status online";render();},e=>{console.error(e);sync.textContent="Sync error";sync.className="status offline"}));
+ }
+}
+
+function render(){
+ renderDashboard();renderProducts();renderSales();renderDue();renderBank();renderServices();renderExpense();renderReports();
+}
+function renderDashboard(){
+ const sales=data.sales.reduce((a,x)=>a+Number(x.total||0),0), exp=data.expenses.reduce((a,x)=>a+Number(x.amount||0),0), due=data.dues.reduce((a,x)=>a+Number(x.balance||0),0), stock=data.products.reduce((a,x)=>a+Number(x.stock||0),0);
+ $("dashboard").innerHTML=`<h2>ড্যাশবোর্ড</h2><div class="grid">
+ <div class="card">আজ/মোট বিক্রি<div class="metric">${money(sales)}</div></div>
+ <div class="card">মোট খরচ<div class="metric">${money(exp)}</div></div>
+ <div class="card">মোট Due<div class="metric">${money(due)}</div></div>
+ <div class="card">মোট Stock<div class="metric">${stock}</div></div>
+ </div><div class="section card"><b>Live Sync</b><p class="muted">এই অ্যাকাউন্ট দিয়ে অন্য ফোনে Login করলে একই ডাটা দেখা ও আপডেট করা যাবে।</p></div>`;
+}
+function renderProducts(){
+ $("products").innerHTML=`<h2>📦 Stock <button class="right" onclick="window.addProduct()">+ পণ্য</button></h2>
+ <div class="card form"><input id="pn" placeholder="পণ্যের নাম"><div class="row"><input id="pc" type="number" placeholder="ক্রয় মূল্য"><input id="ps" type="number" placeholder="বিক্রয় মূল্য"></div><input id="pq" type="number" placeholder="Stock quantity"><button onclick="window.saveProduct()">Save</button></div>
+ <div class="list">${data.products.map(p=>`<div class="item"><b>${esc(p.name)}</b><br><span class="muted">ক্রয় ${money(p.cost)} • বিক্রি ${money(p.price)} • Stock ${p.stock||0}</span><button class="right danger" onclick="window.del('products','${p.id}')">×</button></div>`).join("")||'<div class="empty">কোনো পণ্য নেই</div>'}</div>`;
+}
+function renderSales(){
+ $("sales").innerHTML=`<h2>🧾 Sale</h2><div class="card form"><select id="sp"><option value="">পণ্য নির্বাচন</option>${data.products.map(p=>`<option value="${p.id}">${esc(p.name)} — ${money(p.price)} — Stock ${p.stock||0}</option>`).join("")}</select><input id="sq" type="number" value="1" min="1" placeholder="Quantity"><select id="stype"><option>Cash</option><option>Due</option></select><input id="sc" placeholder="Customer name (Due হলে)"><button onclick="window.saveSale()">Sale Save</button></div><div class="list">${data.sales.map(s=>`<div class="item"><b>${esc(s.productName)}</b> × ${s.qty}<span class="right">${money(s.total)}</span><br><span class="muted">${esc(s.type||"Cash")} ${s.customer? "• "+esc(s.customer):""}</span></div>`).join("")||'<div class="empty">আজ কোনো sale নেই</div>'}</div>`;
+}
+function renderDue(){
+ $("due").innerHTML=`<h2>👤 Customer Due</h2><div class="card form"><input id="dn" placeholder="Customer name"><input id="dm" placeholder="Mobile number"><input id="da" type="number" placeholder="Due amount"><button onclick="window.saveDue()">Due যোগ করুন</button></div><div class="list">${data.dues.map(d=>`<div class="item"><b>${esc(d.name)}</b><span class="right">${money(d.balance)}</span><br><span class="muted">${esc(d.mobile||"")}</span> <button class="right success" onclick="window.payDue('${d.id}')">Payment</button></div>`).join("")||'<div class="empty">কোনো Due নেই</div>'}</div>`;
+}
+function renderBank(){
+ $("bank").innerHTML=`<h2>💳 Mobile Banking</h2><div class="card form"><select id="bm"><option>bKash</option><option>Nagad</option><option>Rocket</option><option>Cash</option></select><select id="bt"><option>Recharge</option><option>Send Money</option><option>Cash Out</option><option>Payment</option><option>Receive</option></select><input id="ba" type="number" placeholder="Amount"><input id="bn" placeholder="Number / Note"><button onclick="window.saveBank()">Save Transaction</button></div><div class="list">${data.bank.map(x=>`<div class="item"><b>${esc(x.method)}</b> • ${esc(x.type)}<span class="right">${money(x.amount)}</span><br><span class="muted">${esc(x.note||"")}</span></div>`).join("")||'<div class="empty">লেনদেন নেই</div>'}</div>`;
+}
+function renderServices(){
+ $("services").innerHTML=`<h2>🖨️ Print / Flexi</h2><div class="card form"><select id="sv"><option>Photocopy</option><option>B&W Print</option><option>Color Print</option><option>Scan</option><option>Lamination</option><option>Flexi</option></select><input id="sa" type="number" placeholder="Charge / Amount"><input id="sn" placeholder="Note"><button onclick="window.saveService()">Save</button></div><div class="list">${data.services.map(x=>`<div class="item"><b>${esc(x.service)}</b><span class="right">${money(x.amount)}</span><br><span class="muted">${esc(x.note||"")}</span></div>`).join("")||'<div class="empty">কোনো service entry নেই</div>'}</div>`;
+}
+function renderExpense(){
+ $("expense").innerHTML=`<h2>💸 Expense / Cost</h2><div class="card form"><select id="ec"><option>দোকান ভাড়া</option><option>বিদ্যুৎ</option><option>ইন্টারনেট</option><option>মাল কেনা</option><option>যাতায়াত</option><option>কর্মচারী</option><option>অন্যান্য</option></select><input id="ea" type="number" placeholder="Amount"><input id="en" placeholder="Note"><button onclick="window.saveExpense()">খরচ Save</button></div><div class="list">${data.expenses.map(x=>`<div class="item"><b>${esc(x.category)}</b><span class="right">${money(x.amount)}</span><br><span class="muted">${esc(x.note||"")}</span></div>`).join("")||'<div class="empty">খরচের entry নেই</div>'}</div>`;
+}
+function renderReports(){
+ const sales=data.sales.reduce((a,x)=>a+Number(x.total||0),0), exp=data.expenses.reduce((a,x)=>a+Number(x.amount||0),0), profit=sales-exp;
+ $("reports").innerHTML=`<h2>📊 Reports</h2><div class="grid"><div class="card">Sales<div class="metric">${money(sales)}</div></div><div class="card">Expense<div class="metric">${money(exp)}</div></div><div class="card">Net<div class="metric">${money(profit)}</div></div></div>`;
+}
+window.saveProduct=async()=>{if(!$("pn").value)return alert("পণ্যের নাম দিন");await add("products",{name:$("pn").value,cost:+$("pc").value||0,price:+$("ps").value||0,stock:+$("pq").value||0});renderProducts()}
+window.del=async(c,id)=>{if(confirm("Delete করবেন?"))await remove(c,id)}
+window.saveSale=async()=>{let p=data.products.find(x=>x.id==$("sp").value),q=+$("sq").value||0;if(!p||q<1)return alert("পণ্য ও quantity দিন");if(q>Number(p.stock||0))return alert("Stock কম");let total=q*Number(p.price||0);await add("sales",{productId:p.id,productName:p.name,qty:q,total,type:$("stype").value,customer:$("sc").value});await edit("products",p.id,{stock:Number(p.stock||0)-q});if($("stype").value==="Due"&&$("sc").value)await add("dues",{name:$("sc").value,mobile:"",balance:total});}
+window.saveDue=async()=>{if(!$("dn").value||!+$("da").value)return alert("নাম ও amount দিন");await add("dues",{name:$("dn").value,mobile:$("dm").value,balance:+$("da").value})}
+window.payDue=async id=>{let d=data.dues.find(x=>x.id===id),a=+prompt("কত টাকা পরিশোধ করেছে?",0);if(a>0)await edit("dues",id,{balance:Math.max(0,Number(d.balance)-a)})}
+window.saveBank=async()=>{await add("bank",{method:$("bm").value,type:$("bt").value,amount:+$("ba").value||0,note:$("bn").value})}
+window.saveService=async()=>{await add("services",{service:$("sv").value,amount:+$("sa").value||0,note:$("sn").value})}
+window.saveExpense=async()=>{await add("expenses",{category:$("ec").value,amount:+$("ea").value||0,note:$("en").value})}
+$("logout").onclick=()=>signOut(auth);
+$("loginBtn").onclick=async()=>{try{await signInWithEmailAndPassword(auth,$("email").value,$("password").value)}catch(e){$("authMsg").textContent=e.message}}
+$("signupBtn").onclick=async()=>{try{await createUserWithEmailAndPassword(auth,$("email").value,$("password").value)}catch(e){$("authMsg").textContent=e.message}}
+
+if(!configured){
+ $("authMsg").innerHTML="<b>Setup needed:</b> Firebase config বসাতে হবে। README দেখুন।";
+ $("loginBtn").disabled=true;$("signupBtn").disabled=true;
+ sync.textContent="Firebase setup needed";
+}else{
+ const app=initializeApp(firebaseConfig);auth=getAuth(app);db=getFirestore(app);
+ onAuthStateChanged(auth,u=>{user=u;if(u){login.classList.add("hidden");appEl.classList.remove("hidden");$("userLine").textContent=u.email+" • Live Sync";subscribe();showPage("dashboard")}else{appEl.classList.add("hidden");login.classList.remove("hidden");unsubs.forEach(f=>f())}});
+}
+</script>
+</body>
+</html>
